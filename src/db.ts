@@ -4,10 +4,12 @@ import { Pool, types } from 'pg';
 // them as JS numbers is exact (pg returns bigint as a string by default).
 types.setTypeParser(types.builtins.INT8, Number);
 
-export const db = new Pool({
+export const connection = {
   host: process.env.PGHOST ?? 'localhost',
   port: Number(process.env.PGPORT ?? 5432),
   user: process.env.PGUSER ?? 'postgres',
   password: process.env.PGPASSWORD ?? 'postgres',
   database: process.env.PGDATABASE ?? 'matching',
-});
+};
+
+export const db = new Pool(connection);
