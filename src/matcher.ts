@@ -1,5 +1,14 @@
+import type { PoolClient } from "pg";
 import { db } from "./db";
-import { type BankLine, type Candidate, type Decision, decide, withoutContested } from "./decision";
+import {
+  type BankLine,
+  type Candidate,
+  type Decision,
+  type Evidence,
+  type Reason,
+  decide,
+  withoutContested,
+} from "./decision";
 
 // README: the due date is between 3 days before and 30 days after the transaction date.
 const DUE_DATE_WINDOW = { daysBefore: 3, daysAfter: 30 };
@@ -36,6 +45,16 @@ const CANDIDATES_SQL = `
     and t.matched_invoice_id is null
   order by t.id, i.id`;
 
+// All the pairings of a run are written by one statement.
+const SAVE_PAIRINGS_SQL = `
+  update transaction t
+  set matched_invoice_id = p.invoice_id,
+      match_evidence = p.evidence,
+      matched_at = now()
+  from unnest($1::uuid[], $2::uuid[], $3::text[]) as p (transaction_id, invoice_id, evidence)
+  where t.id = p.transaction_id
+    and t.matched_invoice_id is null`;
+
 type CandidateRow = {
   transaction_id: string;
   label: string | null;
@@ -48,6 +67,13 @@ type CandidateRow = {
 type PendingTransaction = {
   line: BankLine;
   candidates: Candidate[];
+};
+
+export type RunSummary = {
+  /** Eligible transactions the run looked at. */
+  considered: number;
+  matched: Record<Evidence, number>;
+  unmatched: Record<Reason, number>;
 };
 
 function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransaction> {
@@ -69,16 +95,9 @@ function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransactio
   return transactions;
 }
 
-export async function runAutoMatching(companySiren: string): Promise<void> {
-  const {
-    rows: [company],
-  } = await db.query<{ id: string }>("select id from company where siren = $1", [companySiren]);
-  if (!company) {
-    throw new Error(`No company with SIREN ${companySiren}`);
-  }
-
-  const { rows } = await db.query<CandidateRow>(CANDIDATES_SQL, [
-    company.id,
+async function decideAll(client: PoolClient, companyId: string): Promise<Map<string, Decision>> {
+  const { rows } = await client.query<CandidateRow>(CANDIDATES_SQL, [
+    companyId,
     DUE_DATE_WINDOW.daysBefore,
     DUE_DATE_WINDOW.daysAfter,
   ]);
@@ -87,24 +106,83 @@ export async function runAutoMatching(companySiren: string): Promise<void> {
   for (const [transactionId, transaction] of groupByTransaction(rows)) {
     decisions.set(transactionId, decide(transaction.line, transaction.candidates));
   }
+  return withoutContested(decisions);
+}
 
-  let matched = 0;
-
-  for (const [transactionId, decision] of withoutContested(decisions)) {
-    if (!decision.matched) {
-      continue;
-    }
-    try {
-      await db.query(
-        `update transaction set matched_invoice_id = $1::uuid
-         where id = $2::uuid and matched_invoice_id is null`,
-        [decision.invoiceId, transactionId],
-      );
-      matched++;
-    } catch (e) {
-      console.log("skip", e);
+async function savePairings(client: PoolClient, decisions: Map<string, Decision>): Promise<void> {
+  const transactionIds: string[] = [];
+  const invoiceIds: string[] = [];
+  const evidences: Evidence[] = [];
+  for (const [transactionId, decision] of decisions) {
+    if (decision.matched) {
+      transactionIds.push(transactionId);
+      invoiceIds.push(decision.invoiceId);
+      evidences.push(decision.evidence);
     }
   }
 
-  console.log(`Matched ${matched} of ${decisions.size} transactions`);
+  const { rowCount } = await client.query(SAVE_PAIRINGS_SQL, [transactionIds, invoiceIds, evidences]);
+  if (rowCount !== transactionIds.length) {
+    // Someone paired one of these transactions while the run was deciding.
+    throw new Error(`Expected to write ${transactionIds.length} pairings, wrote ${rowCount}`);
+  }
+}
+
+function summarize(decisions: Map<string, Decision>): RunSummary {
+  const summary: RunSummary = {
+    considered: decisions.size,
+    matched: { reference: 0, supplier: 0 },
+    unmatched: { no_candidate: 0, reference_mismatch: 0, no_evidence: 0, ambiguous: 0, contested: 0 },
+  };
+  for (const decision of decisions.values()) {
+    if (decision.matched) {
+      summary.matched[decision.evidence]++;
+    } else {
+      summary.unmatched[decision.reason]++;
+    }
+  }
+  return summary;
+}
+
+// The SIREN is the only value that comes from outside. A Siren can only be made by
+// parseSiren, so a string that was not checked does not compile as an argument of the job.
+export type Siren = string & { readonly __brand: "Siren" };
+
+export function parseSiren(input: string): Siren {
+  if (!/^\d{9}$/.test(input)) {
+    throw new Error(`Not a SIREN, 9 digits expected: ${JSON.stringify(input)}`);
+  }
+  return input as Siren;
+}
+
+/**
+ * Pairs the unmatched outgoing transactions of a company with the supplier invoices they
+ * pay. The whole run is one database transaction: it writes every pairing or none.
+ */
+export async function runAutoMatching(companySiren: Siren): Promise<RunSummary> {
+  const client = await db.connect();
+  try {
+    await client.query("begin");
+
+    // The row lock makes two runs on the same company wait for each other.
+    const {
+      rows: [company],
+    } = await client.query<{ id: string }>("select id from company where siren = $1 for update", [
+      companySiren,
+    ]);
+    if (!company) {
+      throw new Error(`No company with SIREN ${companySiren}`);
+    }
+
+    const decisions = await decideAll(client, company.id);
+    await savePairings(client, decisions);
+
+    await client.query("commit");
+    return summarize(decisions);
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

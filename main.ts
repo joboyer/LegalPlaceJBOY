@@ -1,8 +1,14 @@
 import { db } from './src/db';
-import { runAutoMatching } from './src/matcher';
+import { parseSiren, runAutoMatching } from './src/matcher';
 
 async function main() {
-  await runAutoMatching('900997767');
+  const siren = parseSiren(process.argv[2] ?? '900997767');
+  const { considered, matched, unmatched } = await runAutoMatching(siren);
+
+  const total = matched.reference + matched.supplier;
+  console.log(`Company ${siren}: matched ${total} of ${considered} eligible transactions`);
+  console.log('Matched on:', matched);
+  console.log('Left unmatched because:', unmatched);
   await db.end();
 }
 
