@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { type BankLine, type Candidate, type Decision, decide, withoutContested } from "./decision";
 
 // README: the due date is between 3 days before and 30 days after the transaction date.
 const DUE_DATE_WINDOW = { daysBefore: 3, daysAfter: 30 };
@@ -12,11 +13,10 @@ const DUE_DATE_WINDOW = { daysBefore: 3, daysAfter: 30 };
 const CANDIDATES_SQL = `
   select t.id as transaction_id,
          t.label,
-         t.date as transaction_date,
+         t.reference,
          i.id as invoice_id,
          i.supplier_name,
-         i.invoice_number,
-         i.due_date
+         i.invoice_number
   from transaction t
   join account a on a.id = t.account_id
   left join buying_invoice i
@@ -39,80 +39,34 @@ const CANDIDATES_SQL = `
 type CandidateRow = {
   transaction_id: string;
   label: string | null;
-  transaction_date: Date;
+  reference: string | null;
   invoice_id: string | null;
   supplier_name: string | null;
   invoice_number: string | null;
-  due_date: Date | null;
-};
-
-type Candidate = {
-  invoiceId: string;
-  supplierName: string | null;
-  invoiceNumber: string | null;
-  dueDate: Date;
 };
 
 type PendingTransaction = {
-  id: string;
-  label: string | null;
-  date: Date;
+  line: BankLine;
   candidates: Candidate[];
 };
 
-export function normalizeLabel(value: string | null): string {
-  return (value ?? "").trim().toLowerCase();
-}
-
-export function dayDiff(a: Date | string, b: Date | string): number {
-  return Math.round((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
-}
-
-function scoreCandidate(transaction: PendingTransaction, candidate: Candidate): number {
-  const label = normalizeLabel(transaction.label);
-  let score = Math.abs(dayDiff(transaction.date, candidate.dueDate));
-
-  if (
-    label.includes(normalizeLabel(candidate.supplierName)) ||
-    label.includes(normalizeLabel(candidate.invoiceNumber))
-  ) {
-    score -= 100;
-  }
-
-  return score;
-}
-
-function findMatch(transaction: PendingTransaction): Candidate | null {
-  if (transaction.candidates.length === 0) {
-    return null;
-  }
-
-  const scored = transaction.candidates.map((candidate) => ({
-    candidate,
-    score: scoreCandidate(transaction, candidate),
-  }));
-  scored.sort((a, b) => a.score - b.score);
-  return scored[0].candidate;
-}
-
-function groupByTransaction(rows: CandidateRow[]): PendingTransaction[] {
+function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransaction> {
   const transactions = new Map<string, PendingTransaction>();
   for (const row of rows) {
     let transaction = transactions.get(row.transaction_id);
     if (!transaction) {
-      transaction = { id: row.transaction_id, label: row.label, date: row.transaction_date, candidates: [] };
+      transaction = { line: { label: row.label, reference: row.reference }, candidates: [] };
       transactions.set(row.transaction_id, transaction);
     }
-    if (row.invoice_id !== null && row.due_date !== null) {
+    if (row.invoice_id !== null) {
       transaction.candidates.push({
         invoiceId: row.invoice_id,
         supplierName: row.supplier_name,
         invoiceNumber: row.invoice_number,
-        dueDate: row.due_date,
       });
     }
   }
-  return [...transactions.values()];
+  return transactions;
 }
 
 export async function runAutoMatching(companySiren: string): Promise<void> {
@@ -128,21 +82,23 @@ export async function runAutoMatching(companySiren: string): Promise<void> {
     DUE_DATE_WINDOW.daysBefore,
     DUE_DATE_WINDOW.daysAfter,
   ]);
-  const transactions = groupByTransaction(rows);
+
+  const decisions = new Map<string, Decision>();
+  for (const [transactionId, transaction] of groupByTransaction(rows)) {
+    decisions.set(transactionId, decide(transaction.line, transaction.candidates));
+  }
 
   let matched = 0;
 
-  for (const transaction of transactions) {
+  for (const [transactionId, decision] of withoutContested(decisions)) {
+    if (!decision.matched) {
+      continue;
+    }
     try {
-      const candidate = findMatch(transaction);
-      if (!candidate) {
-        continue;
-      }
-
       await db.query(
         `update transaction set matched_invoice_id = $1::uuid
          where id = $2::uuid and matched_invoice_id is null`,
-        [candidate.invoiceId, transaction.id],
+        [decision.invoiceId, transactionId],
       );
       matched++;
     } catch (e) {
@@ -150,5 +106,5 @@ export async function runAutoMatching(companySiren: string): Promise<void> {
     }
   }
 
-  console.log(`Matched ${matched} of ${transactions.length} transactions`);
+  console.log(`Matched ${matched} of ${decisions.size} transactions`);
 }
