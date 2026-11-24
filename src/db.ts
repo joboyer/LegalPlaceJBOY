@@ -1,4 +1,8 @@
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
+
+// Amounts are stored as bigint cents. They stay far below Number.MAX_SAFE_INTEGER, so reading
+// them as JS numbers is exact (pg returns bigint as a string by default).
+types.setTypeParser(types.builtins.INT8, Number);
 
 export const db = new Pool({
   host: process.env.PGHOST ?? 'localhost',

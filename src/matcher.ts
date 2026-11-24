@@ -2,7 +2,7 @@ import { db } from "./db";
 
 type TransactionRow = {
   id: string;
-  amount: number;
+  amount_cents: number;
   label: string;
   date: Date;
 };
@@ -11,9 +11,8 @@ type InvoiceRow = {
   id: string;
   supplier_name: string;
   invoice_number: string;
-  tax_free_total: number;
-  vat_amount: number;
-  due_date: string;
+  total_cents: number;
+  due_date: Date;
 };
 
 export function normalizeLabel(value: string): string {
@@ -21,7 +20,9 @@ export function normalizeLabel(value: string): string {
 }
 
 export function dayDiff(a: Date | string, b: Date | string): number {
-  return Math.floor((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
+  // Both dates are local midnights. A clock change makes a day 23 or 25 hours long, so the
+  // difference is rounded to the nearest day instead of floored.
+  return Math.round((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
 }
 
 function scoreCandidate(
@@ -47,9 +48,7 @@ function findMatch(
 ): InvoiceRow | null {
   const candidates = invoices
     .filter(
-      (invoice) =>
-        invoice.tax_free_total + invoice.vat_amount ===
-        Math.abs(transaction.amount),
+      (invoice) => invoice.total_cents === Math.abs(transaction.amount_cents),
     )
     .filter((invoice) => {
       const diff = dayDiff(transaction.date, invoice.due_date);
@@ -70,7 +69,9 @@ function findMatch(
 
 async function getCandidates(companyId: string): Promise<InvoiceRow[]> {
   const { rows } = await db.query(
-    `select * from buying_invoice where company_id = '${companyId}'`,
+    // Without a due date the window cannot be checked, so the invoice is not a candidate.
+    "select * from buying_invoice where company_id = $1::uuid and due_date is not null",
+    [companyId],
   );
   return rows;
 }
@@ -78,13 +79,14 @@ async function getCandidates(companyId: string): Promise<InvoiceRow[]> {
 export async function runAutoMatching(companySiren: string): Promise<void> {
   const {
     rows: [company],
-  } = await db.query(`select * from company where siren = '${companySiren}'`);
+  } = await db.query("select * from company where siren = $1", [companySiren]);
 
   const { rows: transactions } = await db.query<TransactionRow>(
     `select transaction.*
      from transaction
      join account on account.id = transaction.account_id
-     where account.company_id = '${company.id}'`,
+     where account.company_id = $1::uuid`,
+    [company.id],
   );
 
   let matched = 0;
@@ -97,7 +99,8 @@ export async function runAutoMatching(companySiren: string): Promise<void> {
       }
 
       await db.query(
-        `update transaction set matched_invoice_id = '${invoice.id}' where id = '${transaction.id}'`,
+        "update transaction set matched_invoice_id = $1::uuid where id = $2::uuid",
+        [invoice.id, transaction.id],
       );
       matched++;
     } catch (e) {
