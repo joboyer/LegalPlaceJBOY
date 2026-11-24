@@ -44,3 +44,46 @@ then what needs an attacker, a race or more data to hurt (9 to 11), then maintai
 12. **Nothing guards the future.** No foreign key (the seed has a transaction on a missing
     account), no unique or `NOT NULL` constraint, no index. Two tests, none on a matching
     decision. A missing company ends in a `TypeError`.
+
+## Note on the rework
+
+On the seed, the job now pairs 219 of the 983 eligible transactions in under a second (66 on
+the bank reference, 153 on the supplier name) and says why it left the others: 529 have no
+candidate, 118 are ambiguous, 77 have no link to their only candidates, 38 carry a reference
+that names another invoice, 2 compete for the same invoice. It is far below 508 on purpose:
+the rule is "amount and date make a candidate, a pairing also needs a link".
+
+**Left undone on purpose**
+
+- No approximate supplier matching. The label must contain the whole name, so `SLACK T0123`
+  or `TOTALENERGIES STATION` are not recognised.
+- No rule for identical recurring invoices from one supplier (most of the 118 ambiguous
+  cases). I abstain instead of picking the oldest.
+- Partial payments, one payment for several invoices, credit notes.
+- The migration swaps columns in one step. In production I would add the new columns,
+  backfill, move the readers, then drop the old ones.
+- The `NOT NULL` constraints were checked on the seed only. One missing value in production
+  and the migration fails as a whole, so the data has to be checked first.
+- The job connects as the superuser of the docker-compose file. In production it gets its own
+  role, limited to what it does: read the four tables, lock its company row, write the three
+  pairing columns of `transaction`.
+- Duplicate bank lines are left unmatched, not removed. That belongs to ingestion, with a
+  unique `(account_id, remote_id)`.
+
+**What I need from product**
+
+- Which invoice statuses may be paired? I assumed `ToPay` and `Pending`, not `Paid`.
+- May a `Pending` bank transaction be paired? I wait for `Booked`.
+- 1,051 invoices have no due date. Is there another date to use for them?
+- What does `reference` hold in production? I treat any non-empty value as an invoice number.
+- For identical recurring invoices, is "oldest unpaid first" acceptable to accountants?
+
+**What I would build next**
+
+1. Keep every decision with its candidates, and show the abstentions to the customer as
+   suggestions to confirm in one click. 235 transactions here have candidates but no pairing.
+2. Learn supplier aliases from confirmed pairings (bank label to supplier).
+3. Alert on a failed run and on a drop of the matched rate.
+
+`npm test` needs the database up. The integration tests use their own `matching_test`
+database and never touch the seeded one.
