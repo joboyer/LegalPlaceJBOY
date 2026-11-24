@@ -15,7 +15,10 @@ async function givenCompany(siren: string) {
   const company = randomUUID();
   const account = randomUUID();
   await db.query("insert into company (id, siren, name) values ($1, $2, $2)", [company, siren]);
-  await db.query("insert into account (id, company_id, iban) values ($1, $2, 'FR76')", [account, company]);
+  await db.query("insert into account (id, company_id, iban) values ($1, $2, 'FR76')", [
+    account,
+    company,
+  ]);
   return { companyId: company, accountId: account };
 }
 
@@ -34,9 +37,20 @@ async function givenInvoice(overrides: Record<string, unknown> = {}): Promise<st
   };
   await db.query(
     `insert into buying_invoice
-       (id, company_id, supplier_name, invoice_number, tax_free_total_cents, vat_amount_cents, due_date, invoice_status, deleted_at)
+       (id, company_id, supplier_name, invoice_number, tax_free_total_cents, vat_amount_cents,
+        due_date, invoice_status, deleted_at)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [invoice.id, invoice.companyId, invoice.supplier, invoice.number, invoice.taxFreeCents, invoice.vatCents, invoice.dueDate, invoice.status, invoice.deletedAt],
+    [
+      invoice.id,
+      invoice.companyId,
+      invoice.supplier,
+      invoice.number,
+      invoice.taxFreeCents,
+      invoice.vatCents,
+      invoice.dueDate,
+      invoice.status,
+      invoice.deletedAt,
+    ],
   );
   return invoice.id;
 }
@@ -56,16 +70,29 @@ async function givenTransaction(overrides: Record<string, unknown> = {}): Promis
   };
   await db.query(
     `insert into transaction
-       (id, account_id, amount_cents, date, label, reference, status, deleted_at, matched_invoice_id)
+       (id, account_id, amount_cents, date, label, reference, status, deleted_at,
+        matched_invoice_id)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [transaction.id, transaction.accountId, transaction.amountCents, transaction.date, transaction.label, transaction.reference, transaction.status, transaction.deletedAt, transaction.matchedInvoiceId],
+    [
+      transaction.id,
+      transaction.accountId,
+      transaction.amountCents,
+      transaction.date,
+      transaction.label,
+      transaction.reference,
+      transaction.status,
+      transaction.deletedAt,
+      transaction.matchedInvoiceId,
+    ],
   );
   return transaction.id;
 }
 
 async function pairingOf(transactionId: string) {
   const { rows } = await db.query(
-    "select matched_invoice_id as invoice, match_evidence as evidence, matched_at as at from transaction where id = $1",
+    `select matched_invoice_id as invoice, match_evidence as evidence, matched_at as at
+     from transaction
+     where id = $1`,
     [transactionId],
   );
   return rows[0];
@@ -108,7 +135,7 @@ describe("runAutoMatching", () => {
     ["30 days after the payment", "2026-04-28", true],
     ["31 days after the payment", "2026-04-29", false],
     ["unknown", null, false],
-  ])("with a due date %s, pairing is %s", async (_when, dueDate, expected) => {
+  ])("a due date %s (%s) gives a pairing: %s", async (_when, dueDate, expected) => {
     await givenInvoice({ dueDate });
     const transaction = await givenTransaction({ date: "2026-03-29" });
 
@@ -225,15 +252,18 @@ describe("runAutoMatching", () => {
     expect(first.invoice).toBe(invoice);
   });
 
-  it.each([["000000000"], ["' or ''='"]])("fails on the unknown SIREN %s without writing anything", async (siren) => {
-    await givenInvoice();
-    const transaction = await givenTransaction();
+  it.each([["000000000"], ["' or ''='"]])(
+    "fails on the unknown SIREN %s without writing anything",
+    async (siren) => {
+      await givenInvoice();
+      const transaction = await givenTransaction();
 
-    // The cast skips parseSiren on purpose: even unchecked, the value is only data to Postgres.
-    await expect(runAutoMatching(siren as Siren)).rejects.toThrow("No company with SIREN");
+      // The cast skips parseSiren on purpose: even unchecked, the value is only data to Postgres.
+      await expect(runAutoMatching(siren as Siren)).rejects.toThrow("No company with SIREN");
 
-    expect((await pairingOf(transaction)).invoice).toBeNull();
-  });
+      expect((await pairingOf(transaction)).invoice).toBeNull();
+    },
+  );
 });
 
 describe("parseSiren", () => {

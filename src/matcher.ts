@@ -121,7 +121,11 @@ async function savePairings(client: PoolClient, decisions: Map<string, Decision>
     }
   }
 
-  const { rowCount } = await client.query(SAVE_PAIRINGS_SQL, [transactionIds, invoiceIds, evidences]);
+  const { rowCount } = await client.query(SAVE_PAIRINGS_SQL, [
+    transactionIds,
+    invoiceIds,
+    evidences,
+  ]);
   if (rowCount !== transactionIds.length) {
     // Someone paired one of these transactions while the run was deciding.
     throw new Error(`Expected to write ${transactionIds.length} pairings, wrote ${rowCount}`);
@@ -132,7 +136,13 @@ function summarize(decisions: Map<string, Decision>): RunSummary {
   const summary: RunSummary = {
     considered: decisions.size,
     matched: { reference: 0, supplier: 0 },
-    unmatched: { no_candidate: 0, reference_mismatch: 0, no_evidence: 0, ambiguous: 0, contested: 0 },
+    unmatched: {
+      no_candidate: 0,
+      reference_mismatch: 0,
+      no_evidence: 0,
+      ambiguous: 0,
+      contested: 0,
+    },
   };
   for (const decision of decisions.values()) {
     if (decision.matched) {

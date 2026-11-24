@@ -31,8 +31,8 @@ const GENERIC_WORDS = new Set(["sa", "sas", "sasu", "sarl", "eurl", "snc", "sci"
 /** Lower-case words without accents: "Bureau Vallée" gives ["bureau", "vallee"]. */
 export function words(text: string | null): string[] {
   return (text ?? "")
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .normalize("NFD") // "é" becomes "e" followed by a separate accent mark
+    .replace(/[\u0300-\u036f]/g, "") // which this range removes
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);

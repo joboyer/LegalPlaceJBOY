@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { type Candidate, type Decision, decide, labelNamesSupplier, withoutContested } from "./decision";
+import {
+  type Candidate,
+  type Decision,
+  decide,
+  labelNamesSupplier,
+  withoutContested,
+} from "./decision";
 
-const invoice = (invoiceId: string, supplierName: string | null, invoiceNumber: string | null = null): Candidate => ({
+const invoice = (
+  invoiceId: string,
+  supplierName: string | null,
+  invoiceNumber: string | null = null,
+): Candidate => ({
   invoiceId,
   supplierName,
   invoiceNumber,
@@ -32,21 +42,32 @@ describe("labelNamesSupplier", () => {
 
 describe("decide", () => {
   it("leaves the transaction unmatched when there is no candidate", () => {
-    expect(decide({ label: "CB SNCF", reference: "" }, [])).toEqual({ matched: false, reason: "no_candidate" });
+    expect(decide({ label: "CB SNCF", reference: "" }, [])).toEqual({
+      matched: false,
+      reason: "no_candidate",
+    });
   });
 
   it("pairs the only candidate named by the label", () => {
-    const decision = decide({ label: "PRLV SEPA SAGE", reference: "" }, [invoice("sage", "Sage SAS"), invoice("qonto", "Qonto", "")]);
+    const decision = decide({ label: "PRLV SEPA SAGE", reference: "" }, [
+      invoice("sage", "Sage SAS"),
+      invoice("qonto", "Qonto", ""),
+    ]);
     expect(decision).toEqual({ matched: true, invoiceId: "sage", evidence: "supplier" });
   });
 
   it("does not pair a single candidate that nothing links to the bank line", () => {
-    const decision = decide({ label: "PRLV SEPA HISCOX", reference: "" }, [invoice("allianz", "Allianz")]);
+    const decision = decide({ label: "PRLV SEPA HISCOX", reference: "" }, [
+      invoice("allianz", "Allianz"),
+    ]);
     expect(decision).toEqual({ matched: false, reason: "no_evidence" });
   });
 
   it("abstains when the label names several candidates", () => {
-    const decision = decide({ label: "PRLV SEPA FREE PRO", reference: "" }, [invoice("march", "Free Pro"), invoice("april", "Free Pro")]);
+    const decision = decide({ label: "PRLV SEPA FREE PRO", reference: "" }, [
+      invoice("march", "Free Pro"),
+      invoice("april", "Free Pro"),
+    ]);
     expect(decision).toEqual({ matched: false, reason: "ambiguous" });
   });
 
@@ -59,12 +80,16 @@ describe("decide", () => {
   });
 
   it("abstains when the reference names an invoice that is not a candidate", () => {
-    const decision = decide({ label: "CB ATLASSIAN F-215", reference: "F-215" }, [invoice("other", "Atlassian", "F-321")]);
+    const decision = decide({ label: "CB ATLASSIAN F-215", reference: "F-215" }, [
+      invoice("other", "Atlassian", "F-321"),
+    ]);
     expect(decision).toEqual({ matched: false, reason: "reference_mismatch" });
   });
 
   it("never treats an empty invoice number as a match", () => {
-    const decision = decide({ label: "PRLV SEPA", reference: " " }, [invoice("qonto", "Qonto", "")]);
+    const decision = decide({ label: "PRLV SEPA", reference: " " }, [
+      invoice("qonto", "Qonto", ""),
+    ]);
     expect(decision).toEqual({ matched: false, reason: "no_evidence" });
   });
 });
@@ -73,7 +98,13 @@ describe("withoutContested", () => {
   it("gives an invoice claimed by two transactions to neither", () => {
     const claim: Decision = { matched: true, invoiceId: "rent", evidence: "supplier" };
     const other: Decision = { matched: true, invoiceId: "phone", evidence: "reference" };
-    const settled = withoutContested(new Map([["t1", claim], ["t2", claim], ["t3", other]]));
+    const settled = withoutContested(
+      new Map([
+        ["t1", claim],
+        ["t2", claim],
+        ["t3", other],
+      ]),
+    );
     expect(settled.get("t1")).toEqual({ matched: false, reason: "contested" });
     expect(settled.get("t2")).toEqual({ matched: false, reason: "contested" });
     expect(settled.get("t3")).toEqual(other);
