@@ -48,10 +48,16 @@ then what needs an attacker, a race or more data to hurt (9 to 11), then maintai
 ## Note on the rework
 
 On the seed, the job now pairs 219 of the 983 eligible transactions in under a second (66 on
-the bank reference, 153 on the supplier name) and says why it left the others: 529 have no
-candidate, 118 are ambiguous, 77 have no link to their only candidates, 38 carry a reference
+the bank reference, 153 on the supplier name) and says why it left the others: 506 have no
+candidate, 118 are ambiguous, 77 have no link to their only candidates, 29 carry a reference
 that names another invoice, 2 compete for the same invoice. It is far below 508 on purpose:
 the rule is "amount and date make a candidate, a pairing also needs a link".
+
+32 payments are flagged for review: their reference names an invoice that is already paid,
+cancelled or deleted (28 marked paid). Each one is a double payment, a refund or credit note
+to claim, or a pairing made by hand. The job never pairs them; a person has to decide. The
+flag is stored on the transaction (`flagged_at`, `review_reason`, `review_invoice_id`), so a
+payment is flagged once, not on every run.
 
 **Left undone on purpose**
 
@@ -65,8 +71,8 @@ the rule is "amount and date make a candidate, a pairing also needs a link".
 - The `NOT NULL` constraints were checked on the seed only. One missing value in production
   and the migration fails as a whole, so the data has to be checked first.
 - The job connects as the superuser of the docker-compose file. In production it gets its own
-  role, limited to what it does: read the four tables, lock its company row, write the three
-  pairing columns of `transaction`.
+  role, limited to what it does: read the four tables, lock its company row, write the pairing
+  and review columns of `transaction`.
 - Duplicate bank lines are left unmatched, not removed. That belongs to ingestion, with a
   unique `(account_id, remote_id)`.
 

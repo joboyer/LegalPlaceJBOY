@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type Candidate,
   type Decision,
+  type Unpayable,
   decide,
   labelNamesSupplier,
   withoutContested,
@@ -11,10 +12,12 @@ const invoice = (
   invoiceId: string,
   supplierName: string | null,
   invoiceNumber: string | null = null,
+  unpayable: Unpayable | null = null,
 ): Candidate => ({
   invoiceId,
   supplierName,
   invoiceNumber,
+  unpayable,
 });
 
 describe("labelNamesSupplier", () => {
@@ -91,6 +94,38 @@ describe("decide", () => {
       invoice("qonto", "Qonto", ""),
     ]);
     expect(decision).toEqual({ matched: false, reason: "no_evidence" });
+  });
+});
+
+describe("decide, with invoices that cannot be paid any more", () => {
+  it.each<[Unpayable]>([["paid"], ["cancelled"], ["deleted"], ["paired"]])(
+    "reports a reference that names a %s invoice, without pairing it",
+    (state) => {
+      const decision = decide({ label: "VIR ACME F-7", reference: "F-7" }, [
+        invoice("settled", "Acme", "F-7", state),
+        invoice("open", "Acme", "F-8"),
+      ]);
+      expect(decision).toEqual({
+        matched: false,
+        reason: "names_unpayable_invoice",
+        invoiceId: "settled",
+        invoice: state,
+      });
+    },
+  );
+
+  it("never pairs a settled invoice named by the label", () => {
+    const decision = decide({ label: "PRLV SEPA ACME", reference: "" }, [
+      invoice("settled", "Acme", "F-7", "paid"),
+    ]);
+    expect(decision).toEqual({ matched: false, reason: "no_candidate" });
+  });
+
+  it("does not report an amount and a date that only happen to fit a settled invoice", () => {
+    const decision = decide({ label: "CB OTHER F-9", reference: "F-9" }, [
+      invoice("settled", "Acme", "F-7", "paid"),
+    ]);
+    expect(decision).toEqual({ matched: false, reason: "no_candidate" });
   });
 });
 

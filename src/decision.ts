@@ -6,10 +6,14 @@ export type BankLine = {
   reference: string | null;
 };
 
+/** Why an invoice cannot be paid any more. null: it can. */
+export type Unpayable = "paid" | "cancelled" | "deleted" | "paired";
+
 export type Candidate = {
   invoiceId: string;
   supplierName: string | null;
   invoiceNumber: string | null;
+  unpayable: Unpayable | null;
 };
 
 export type Evidence = "reference" | "supplier";
@@ -19,11 +23,15 @@ export type Reason =
   | "reference_mismatch"
   | "no_evidence"
   | "ambiguous"
-  | "contested";
+  | "contested"
+  | "names_unpayable_invoice";
 
 export type Decision =
   | { matched: true; invoiceId: string; evidence: Evidence }
-  | { matched: false; reason: Reason };
+  | { matched: false; reason: Exclude<Reason, "names_unpayable_invoice"> }
+  // The reference names an invoice that is already paid, cancelled or deleted: a double
+  // payment, a refund to claim or a pairing made by hand. Only a person can tell.
+  | { matched: false; reason: "names_unpayable_invoice"; invoiceId: string; invoice: Unpayable };
 
 // Words that say what kind of company it is, not which one.
 const GENERIC_WORDS = new Set(["sa", "sas", "sasu", "sarl", "eurl", "snc", "sci", "france"]);
@@ -57,18 +65,35 @@ function isNumber(invoiceNumber: string | null, reference: string): boolean {
  * - the bank reference is the invoice number, or
  * - there is no reference and the label names the supplier.
  * With no link, or with a link to several candidates, the transaction stays unmatched.
+ * Only payable invoices are paired. When the reference names an invoice that is not payable,
+ * the transaction is reported for review instead.
  */
 export function decide(line: BankLine, candidates: Candidate[]): Decision {
-  if (candidates.length === 0) {
+  const payable = candidates.filter((candidate) => candidate.unpayable === null);
+  const reference = (line.reference ?? "").trim();
+
+  if (reference !== "") {
+    const named = candidates.filter((candidate) => isNumber(candidate.invoiceNumber, reference));
+    const [only] = named;
+    if (named.length === 1 && only.unpayable !== null) {
+      return {
+        matched: false,
+        reason: "names_unpayable_invoice",
+        invoiceId: only.invoiceId,
+        invoice: only.unpayable,
+      };
+    }
+  }
+
+  if (payable.length === 0) {
     return { matched: false, reason: "no_candidate" };
   }
 
-  const reference = (line.reference ?? "").trim();
   const named =
     reference !== ""
       ? // The payer named an invoice: no other invoice may be paired with this line.
-        candidates.filter((candidate) => isNumber(candidate.invoiceNumber, reference))
-      : candidates.filter((candidate) => labelNamesSupplier(line.label, candidate.supplierName));
+        payable.filter((candidate) => isNumber(candidate.invoiceNumber, reference))
+      : payable.filter((candidate) => labelNamesSupplier(line.label, candidate.supplierName));
 
   if (named.length === 1) {
     return {

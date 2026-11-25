@@ -6,6 +6,7 @@ import {
   type Decision,
   type Evidence,
   type Reason,
+  type Unpayable,
   decide,
   withoutContested,
 } from "./decision";
@@ -16,33 +17,40 @@ const DUE_DATE_WINDOW = { daysBefore: 3, daysAfter: 30 };
 // One row per (eligible transaction, candidate invoice). A transaction without any
 // candidate still comes back once, with a null invoice.
 //
-// Eligible transaction: belongs to the company, outgoing, booked, not deleted, not matched.
-// Candidate invoice: same company, payable (ToPay or Pending), not deleted, not already
-// paid by another transaction, same amount to the cent, due date inside the window.
+// Eligible transaction: belongs to the company, outgoing, booked, not deleted, not matched,
+// not flagged for review.
+// Candidate invoice: same company, same amount to the cent, due date inside the window.
+// `unpayable` says why a candidate cannot be paired: only invoices where it is null
+// (ToPay or Pending, not deleted, not paid by another transaction) can be.
 const CANDIDATES_SQL = `
   select t.id as transaction_id,
          t.label,
          t.reference,
          i.id as invoice_id,
          i.supplier_name,
-         i.invoice_number
+         i.invoice_number,
+         case
+           when i.id is null then null
+           when i.deleted_at is not null then 'deleted'
+           when i.invoice_status = 'Cancelled' then 'cancelled'
+           when i.invoice_status not in ('ToPay', 'Pending') then 'paid'
+           when exists (
+             select 1 from transaction paid
+             where paid.matched_invoice_id = i.id and paid.deleted_at is null
+           ) then 'paired'
+         end as unpayable
   from transaction t
   join account a on a.id = t.account_id
   left join buying_invoice i
     on i.company_id = a.company_id
-   and i.deleted_at is null
-   and i.invoice_status in ('ToPay', 'Pending')
    and i.total_cents = -t.amount_cents
    and i.due_date between t.date - $2::int and t.date + $3::int
-   and not exists (
-     select 1 from transaction paid
-     where paid.matched_invoice_id = i.id and paid.deleted_at is null
-   )
   where a.company_id = $1::uuid
     and t.amount_cents < 0
     and t.status = 'Booked'
     and t.deleted_at is null
     and t.matched_invoice_id is null
+    and t.flagged_at is null
   order by t.id, i.id`;
 
 // All the pairings of a run are written by one statement.
@@ -55,6 +63,18 @@ const SAVE_PAIRINGS_SQL = `
   where t.id = p.transaction_id
     and t.matched_invoice_id is null`;
 
+// Flags are written once: a flagged transaction is no longer eligible, so no later run
+// reports it again until a person clears the flag or pairs it by hand.
+const SAVE_FLAGS_SQL = `
+  update transaction t
+  set review_invoice_id = f.invoice_id,
+      review_reason = f.reason,
+      flagged_at = now()
+  from unnest($1::uuid[], $2::uuid[], $3::text[]) as f (transaction_id, invoice_id, reason)
+  where t.id = f.transaction_id
+    and t.flagged_at is null
+    and t.matched_invoice_id is null`;
+
 type CandidateRow = {
   transaction_id: string;
   label: string | null;
@@ -62,6 +82,7 @@ type CandidateRow = {
   invoice_id: string | null;
   supplier_name: string | null;
   invoice_number: string | null;
+  unpayable: Unpayable | null;
 };
 
 type PendingTransaction = {
@@ -74,6 +95,8 @@ export type RunSummary = {
   considered: number;
   matched: Record<Evidence, number>;
   unmatched: Record<Reason, number>;
+  /** Payments flagged by this run: their reference names an invoice already settled. */
+  toReview: { transactionId: string; invoiceId: string; invoice: Unpayable }[];
 };
 
 function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransaction> {
@@ -89,6 +112,7 @@ function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransactio
         invoiceId: row.invoice_id,
         supplierName: row.supplier_name,
         invoiceNumber: row.invoice_number,
+        unpayable: row.unpayable,
       });
     }
   }
@@ -132,6 +156,17 @@ async function savePairings(client: PoolClient, decisions: Map<string, Decision>
   }
 }
 
+async function saveFlags(client: PoolClient, flags: RunSummary["toReview"]): Promise<void> {
+  const { rowCount } = await client.query(SAVE_FLAGS_SQL, [
+    flags.map((flag) => flag.transactionId),
+    flags.map((flag) => flag.invoiceId),
+    flags.map((flag) => flag.invoice),
+  ]);
+  if (rowCount !== flags.length) {
+    throw new Error(`Expected to write ${flags.length} flags, wrote ${rowCount}`);
+  }
+}
+
 function summarize(decisions: Map<string, Decision>): RunSummary {
   const summary: RunSummary = {
     considered: decisions.size,
@@ -142,13 +177,19 @@ function summarize(decisions: Map<string, Decision>): RunSummary {
       no_evidence: 0,
       ambiguous: 0,
       contested: 0,
+      names_unpayable_invoice: 0,
     },
+    toReview: [],
   };
-  for (const decision of decisions.values()) {
+  for (const [transactionId, decision] of decisions) {
     if (decision.matched) {
       summary.matched[decision.evidence]++;
     } else {
       summary.unmatched[decision.reason]++;
+      if (decision.reason === "names_unpayable_invoice") {
+        const { invoiceId, invoice } = decision;
+        summary.toReview.push({ transactionId, invoiceId, invoice });
+      }
     }
   }
   return summary;
@@ -186,9 +227,11 @@ export async function runAutoMatching(companySiren: Siren): Promise<RunSummary> 
 
     const decisions = await decideAll(client, company.id);
     await savePairings(client, decisions);
+    const summary = summarize(decisions);
+    await saveFlags(client, summary.toReview);
 
     await client.query("commit");
-    return summarize(decisions);
+    return summary;
   } catch (error) {
     await client.query("rollback");
     throw error;

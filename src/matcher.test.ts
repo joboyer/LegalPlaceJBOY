@@ -88,6 +88,16 @@ async function givenTransaction(overrides: Record<string, unknown> = {}): Promis
   return transaction.id;
 }
 
+async function flagOf(transactionId: string) {
+  const { rows } = await db.query(
+    `select review_invoice_id as invoice, review_reason as reason, flagged_at as at
+     from transaction
+     where id = $1`,
+    [transactionId],
+  );
+  return rows[0];
+}
+
 async function pairingOf(transactionId: string) {
   const { rows } = await db.query(
     `select matched_invoice_id as invoice, match_evidence as evidence, matched_at as at
@@ -215,6 +225,45 @@ describe("runAutoMatching", () => {
     await runAutoMatching(SIREN);
 
     expect(await pairingOf(transaction)).toMatchObject({ invoice: second, evidence: "reference" });
+  });
+
+  it("reports a second payment of an invoice that is already paid", async () => {
+    const invoice = await givenInvoice();
+    await givenTransaction({ reference: "INV-1", matchedInvoiceId: invoice });
+    const second = await givenTransaction({ reference: "INV-1", date: "2026-03-12" });
+
+    const summary = await runAutoMatching(SIREN);
+
+    expect((await pairingOf(second)).invoice).toBeNull();
+    expect(summary.toReview).toEqual([
+      { transactionId: second, invoiceId: invoice, invoice: "paired" },
+    ]);
+  });
+
+  it("reports a payment of a cancelled invoice", async () => {
+    const invoice = await givenInvoice({ status: "Cancelled" });
+    const transaction = await givenTransaction({ reference: "INV-1" });
+
+    const summary = await runAutoMatching(SIREN);
+
+    expect((await pairingOf(transaction)).invoice).toBeNull();
+    expect(summary.toReview).toEqual([
+      { transactionId: transaction, invoiceId: invoice, invoice: "cancelled" },
+    ]);
+  });
+
+  it("flags a payment once, then leaves it out of later runs", async () => {
+    const invoice = await givenInvoice({ status: "Paid" });
+    const transaction = await givenTransaction({ reference: "INV-1" });
+
+    await runAutoMatching(SIREN);
+    const flag = await flagOf(transaction);
+    const second = await runAutoMatching(SIREN);
+
+    expect(flag).toMatchObject({ invoice, reason: "paid" });
+    expect(flag.at).toBeInstanceOf(Date);
+    expect(second).toMatchObject({ considered: 0, toReview: [] });
+    expect(await flagOf(transaction)).toEqual(flag);
   });
 
   it("gives an invoice claimed by two transactions to neither", async () => {
