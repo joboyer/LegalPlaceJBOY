@@ -26,6 +26,12 @@ export type Reason =
   | "contested"
   | "names_unpayable_invoice";
 
+/** An eligible bank transaction with the invoices of the same amount around its date. */
+export type TransactionToMatch = {
+  line: BankLine;
+  candidates: Candidate[];
+};
+
 export type Decision =
   | { matched: true; invoiceId: string; evidence: Evidence }
   | { matched: false; reason: Exclude<Reason, "names_unpayable_invoice"> }
@@ -133,4 +139,21 @@ export function withoutContested<Id>(decisions: Map<Id, Decision>): Map<Id, Deci
     settled.set(id, contested ? { matched: false, reason: "contested" } : decision);
   }
   return settled;
+}
+
+export type Outcome = { decision: Decision; suggestedInvoiceId: string | null };
+
+/** Decides every transaction of a run, then settles the invoices claimed twice. */
+export function decideAll<Id>(transactions: Map<Id, TransactionToMatch>): Map<Id, Outcome> {
+  const decisions = new Map<Id, Decision>();
+  for (const [id, { line, candidates }] of transactions) {
+    decisions.set(id, decide(line, candidates));
+  }
+
+  const outcomes = new Map<Id, Outcome>();
+  for (const [id, decision] of withoutContested(decisions)) {
+    const candidates = transactions.get(id)?.candidates ?? [];
+    outcomes.set(id, { decision, suggestedInvoiceId: suggestion(decision, candidates) });
+  }
+  return outcomes;
 }

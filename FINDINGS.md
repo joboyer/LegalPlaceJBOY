@@ -95,5 +95,12 @@ stored as `suggested_invoice_id`, for a person to confirm in one click.
 2. Learn supplier aliases from confirmed pairings (bank label to supplier).
 3. Alert on a failed run and on a drop of the matched rate.
 
+**Where the code is**
+
+`src/matcher.ts` from the README is now `src/matching/`, split the way a NestJS module would be,
+without the framework: `decision.ts` holds every rule and touches no database,
+`matching.repository.ts` holds every query, `matching.service.ts` runs them in one database
+transaction, `siren.ts` checks the only input. `main.ts` stays the entry point.
+
 `npm test` needs the database up. The integration tests use their own `matching_test`
 database and never touch the seeded one.

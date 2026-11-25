@@ -1,5 +1,6 @@
 import { db } from './src/db';
-import { parseSiren, runAutoMatching } from './src/matcher';
+import { runAutoMatching } from './src/matching/matching.service';
+import { parseSiren } from './src/matching/siren';
 
 async function main() {
   const siren = parseSiren(process.argv[2] ?? '900997767');

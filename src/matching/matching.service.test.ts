@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db } from "./db";
-import { type Siren, parseSiren, runAutoMatching } from "./matcher";
+import { db } from "../db";
+import { runAutoMatching } from "./matching.service";
+import { type Siren, parseSiren } from "./siren";
 
 // These tests run the real job against Postgres. Each one states a rule with the smallest
 // data that shows it: by default, one invoice of 120.00 from Acme due on the day of a
@@ -346,19 +347,6 @@ describe("runAutoMatching", () => {
       await expect(runAutoMatching(siren as Siren)).rejects.toThrow("No company with SIREN");
 
       expect((await pairingOf(transaction)).invoice).toBeNull();
-    },
-  );
-});
-
-describe("parseSiren", () => {
-  it("accepts 9 digits", () => {
-    expect(parseSiren("900997767")).toBe("900997767");
-  });
-
-  it.each([[""], ["90099776"], ["9009977670"], ["900 997 767"], ["900997767\n"], ["' or ''='"]])(
-    "refuses %j",
-    (input) => {
-      expect(() => parseSiren(input)).toThrow("Not a SIREN");
     },
   );
 });
