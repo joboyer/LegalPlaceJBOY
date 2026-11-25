@@ -5,6 +5,7 @@ import {
   type Unpayable,
   decide,
   labelNamesSupplier,
+  suggestion,
   withoutContested,
 } from "./decision";
 
@@ -126,6 +127,23 @@ describe("decide, with invoices that cannot be paid any more", () => {
       invoice("settled", "Acme", "F-7", "paid"),
     ]);
     expect(decision).toEqual({ matched: false, reason: "no_candidate" });
+  });
+});
+
+describe("suggestion", () => {
+  const line = { label: "PRLV SEPA HISCOX", reference: "" };
+
+  it("suggests the only candidate when nothing links it to the bank line", () => {
+    const candidates = [invoice("allianz", "Allianz")];
+    expect(suggestion(decide(line, candidates), candidates)).toBe("allianz");
+  });
+
+  it.each([
+    ["two candidates", [invoice("a", "Allianz"), invoice("b", "Axa")]],
+    ["no payable candidate", [invoice("a", "Allianz", null, "paid")]],
+    ["a pairing", [invoice("hiscox", "Hiscox")]],
+  ])("suggests nothing with %s", (_case, candidates) => {
+    expect(suggestion(decide(line, candidates), candidates)).toBeNull();
   });
 });
 

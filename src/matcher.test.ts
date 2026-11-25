@@ -88,6 +88,16 @@ async function givenTransaction(overrides: Record<string, unknown> = {}): Promis
   return transaction.id;
 }
 
+async function openStateOf(transactionId: string) {
+  const { rows } = await db.query(
+    `select open_reason as reason, suggested_invoice_id as suggestion, checked_at as at
+     from transaction
+     where id = $1`,
+    [transactionId],
+  );
+  return rows[0];
+}
+
 async function flagOf(transactionId: string) {
   const { rows } = await db.query(
     `select review_invoice_id as invoice, review_reason as reason, flagged_at as at
@@ -204,6 +214,31 @@ describe("runAutoMatching", () => {
 
     expect((await pairingOf(transaction)).invoice).toBeNull();
     expect(summary.unmatched.no_evidence).toBe(1);
+  });
+
+  it("records why a transaction stays open and the invoice to suggest", async () => {
+    const invoice = await givenInvoice({ supplier: "Allianz" });
+    const transaction = await givenTransaction({ label: "PRLV SEPA HISCOX" });
+
+    const summary = await runAutoMatching(SIREN);
+
+    expect(summary.suggested).toBe(1);
+    expect(await openStateOf(transaction)).toMatchObject({
+      reason: "no_evidence",
+      suggestion: invoice,
+    });
+  });
+
+  it("clears the reason once a later run pairs the transaction", async () => {
+    const transaction = await givenTransaction();
+    await runAutoMatching(SIREN);
+    expect(await openStateOf(transaction)).toMatchObject({ reason: "no_candidate" });
+
+    await givenInvoice();
+    await runAutoMatching(SIREN);
+
+    expect(await openStateOf(transaction)).toMatchObject({ reason: null, suggestion: null });
+    expect((await pairingOf(transaction)).invoice).not.toBeNull();
   });
 
   it("abstains between two invoices that nothing tells apart", async () => {

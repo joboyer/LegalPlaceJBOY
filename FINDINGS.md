@@ -59,6 +59,10 @@ to claim, or a pairing made by hand. The job never pairs them; a person has to d
 flag is stored on the transaction (`flagged_at`, `review_reason`, `review_invoice_id`), so a
 payment is flagged once, not on every run.
 
+The other open transactions carry their reason (`open_reason`), refreshed on every run since
+a new invoice may change it. 47 of the 77 with no link have a single payable candidate: it is
+stored as `suggested_invoice_id`, for a person to confirm in one click.
+
 **Left undone on purpose**
 
 - No approximate supplier matching. The label must contain the whole name, so `SLACK T0123`
@@ -86,8 +90,8 @@ payment is flagged once, not on every run.
 
 **What I would build next**
 
-1. Keep every decision with its candidates, and show the abstentions to the customer as
-   suggestions to confirm in one click. 235 transactions here have candidates but no pairing.
+1. Show the suggestions and the flags to the customer, and turn each confirmation into a
+   pairing with its own evidence (`confirmed`).
 2. Learn supplier aliases from confirmed pairings (bank label to supplier).
 3. Alert on a failed run and on a drop of the matched rate.
 

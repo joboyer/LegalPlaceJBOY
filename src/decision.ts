@@ -108,6 +108,16 @@ export function decide(line: BankLine, candidates: Candidate[]): Decision {
   return { matched: false, reason: reference !== "" ? "reference_mismatch" : "no_evidence" };
 }
 
+/**
+ * The invoice to suggest for a transaction left open: its only payable candidate, when nothing
+ * links them. Amount and date are not enough to pair, but enough to ask a person.
+ */
+export function suggestion(decision: Decision, candidates: Candidate[]): string | null {
+  const payable = candidates.filter((candidate) => candidate.unpayable === null);
+  const lone = !decision.matched && decision.reason === "no_evidence" && payable.length === 1;
+  return lone ? payable[0].invoiceId : null;
+}
+
 /** An invoice claimed by several transactions goes to none of them. */
 export function withoutContested<Id>(decisions: Map<Id, Decision>): Map<Id, Decision> {
   const claims = new Map<string, number>();

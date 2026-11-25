@@ -8,6 +8,7 @@ import {
   type Reason,
   type Unpayable,
   decide,
+  suggestion,
   withoutContested,
 } from "./decision";
 
@@ -58,7 +59,9 @@ const SAVE_PAIRINGS_SQL = `
   update transaction t
   set matched_invoice_id = p.invoice_id,
       match_evidence = p.evidence,
-      matched_at = now()
+      matched_at = now(),
+      open_reason = null,
+      suggested_invoice_id = null
   from unnest($1::uuid[], $2::uuid[], $3::text[]) as p (transaction_id, invoice_id, evidence)
   where t.id = p.transaction_id
     and t.matched_invoice_id is null`;
@@ -69,11 +72,26 @@ const SAVE_FLAGS_SQL = `
   update transaction t
   set review_invoice_id = f.invoice_id,
       review_reason = f.reason,
-      flagged_at = now()
+      flagged_at = now(),
+      open_reason = null,
+      suggested_invoice_id = null
   from unnest($1::uuid[], $2::uuid[], $3::text[]) as f (transaction_id, invoice_id, reason)
   where t.id = f.transaction_id
     and t.flagged_at is null
     and t.matched_invoice_id is null`;
+
+// The transactions left open get their reason and suggestion again on every run, since a new
+// invoice may change both.
+const SAVE_OPEN_SQL = `
+  update transaction t
+  set open_reason = o.reason,
+      suggested_invoice_id = o.suggested_invoice_id,
+      checked_at = now()
+  from unnest($1::uuid[], $2::text[], $3::uuid[])
+       as o (transaction_id, reason, suggested_invoice_id)
+  where t.id = o.transaction_id
+    and t.matched_invoice_id is null
+    and t.flagged_at is null`;
 
 type CandidateRow = {
   transaction_id: string;
@@ -95,6 +113,8 @@ export type RunSummary = {
   considered: number;
   matched: Record<Evidence, number>;
   unmatched: Record<Reason, number>;
+  /** Open transactions with a lone candidate to confirm by hand. */
+  suggested: number;
   /** Payments flagged by this run: their reference names an invoice already settled. */
   toReview: { transactionId: string; invoiceId: string; invoice: Unpayable }[];
 };
@@ -119,25 +139,34 @@ function groupByTransaction(rows: CandidateRow[]): Map<string, PendingTransactio
   return transactions;
 }
 
-async function decideAll(client: PoolClient, companyId: string): Promise<Map<string, Decision>> {
+type Outcome = { decision: Decision; suggestedInvoiceId: string | null };
+
+async function decideAll(client: PoolClient, companyId: string): Promise<Map<string, Outcome>> {
   const { rows } = await client.query<CandidateRow>(CANDIDATES_SQL, [
     companyId,
     DUE_DATE_WINDOW.daysBefore,
     DUE_DATE_WINDOW.daysAfter,
   ]);
 
+  const transactions = groupByTransaction(rows);
   const decisions = new Map<string, Decision>();
-  for (const [transactionId, transaction] of groupByTransaction(rows)) {
+  for (const [transactionId, transaction] of transactions) {
     decisions.set(transactionId, decide(transaction.line, transaction.candidates));
   }
-  return withoutContested(decisions);
+
+  const outcomes = new Map<string, Outcome>();
+  for (const [transactionId, decision] of withoutContested(decisions)) {
+    const candidates = transactions.get(transactionId)?.candidates ?? [];
+    outcomes.set(transactionId, { decision, suggestedInvoiceId: suggestion(decision, candidates) });
+  }
+  return outcomes;
 }
 
-async function savePairings(client: PoolClient, decisions: Map<string, Decision>): Promise<void> {
+async function savePairings(client: PoolClient, outcomes: Map<string, Outcome>): Promise<void> {
   const transactionIds: string[] = [];
   const invoiceIds: string[] = [];
   const evidences: Evidence[] = [];
-  for (const [transactionId, decision] of decisions) {
+  for (const [transactionId, { decision }] of outcomes) {
     if (decision.matched) {
       transactionIds.push(transactionId);
       invoiceIds.push(decision.invoiceId);
@@ -167,9 +196,23 @@ async function saveFlags(client: PoolClient, flags: RunSummary["toReview"]): Pro
   }
 }
 
-function summarize(decisions: Map<string, Decision>): RunSummary {
+async function saveOpenReasons(client: PoolClient, outcomes: Map<string, Outcome>): Promise<void> {
+  const transactionIds: string[] = [];
+  const reasons: Reason[] = [];
+  const suggestions: (string | null)[] = [];
+  for (const [transactionId, { decision, suggestedInvoiceId }] of outcomes) {
+    if (!decision.matched && decision.reason !== "names_unpayable_invoice") {
+      transactionIds.push(transactionId);
+      reasons.push(decision.reason);
+      suggestions.push(suggestedInvoiceId);
+    }
+  }
+  await client.query(SAVE_OPEN_SQL, [transactionIds, reasons, suggestions]);
+}
+
+function summarize(outcomes: Map<string, Outcome>): RunSummary {
   const summary: RunSummary = {
-    considered: decisions.size,
+    considered: outcomes.size,
     matched: { reference: 0, supplier: 0 },
     unmatched: {
       no_candidate: 0,
@@ -179,9 +222,13 @@ function summarize(decisions: Map<string, Decision>): RunSummary {
       contested: 0,
       names_unpayable_invoice: 0,
     },
+    suggested: 0,
     toReview: [],
   };
-  for (const [transactionId, decision] of decisions) {
+  for (const [transactionId, { decision, suggestedInvoiceId }] of outcomes) {
+    if (suggestedInvoiceId !== null) {
+      summary.suggested++;
+    }
     if (decision.matched) {
       summary.matched[decision.evidence]++;
     } else {
@@ -225,10 +272,11 @@ export async function runAutoMatching(companySiren: Siren): Promise<RunSummary> 
       throw new Error(`No company with SIREN ${companySiren}`);
     }
 
-    const decisions = await decideAll(client, company.id);
-    await savePairings(client, decisions);
-    const summary = summarize(decisions);
+    const outcomes = await decideAll(client, company.id);
+    await savePairings(client, outcomes);
+    const summary = summarize(outcomes);
     await saveFlags(client, summary.toReview);
+    await saveOpenReasons(client, outcomes);
 
     await client.query("commit");
     return summary;
